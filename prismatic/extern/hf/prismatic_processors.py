@@ -1,7 +1,7 @@
 """
 processing_prismatic.py
 
-HuggingFace-style preprocessor definitions for Prismatic VLMs, inheriting from `ProcessorMixin`. 
+HF-style preprocessor definitions for Prismatic VLMs, inheriting from `ProcessorMixin`. 
 Default choice: `siglip-vit-so400m` + `vicuna-v15-7b`.
 """
 
@@ -22,7 +22,7 @@ def letterbox_pad_transform(image: image.Image, padding_fill_value: Tuple[int, i
     padding = (horizontal_pad, vertical_pad, horizontal_pad, vertical_pad)
 
     return TVF.pad(image, padding, fill=padding_fill_value, padding_mode='constant')
-# ========== ==========
+# ====================================
 
 class PrismaticImageProcessor(ImageProcessorMixin):
     '''
@@ -95,7 +95,7 @@ class PrismaticImageProcessor(ImageProcessorMixin):
             )
             # Handle Prismatic `image_resize_strategy`
             if self.image_resize_strategy == "resize-naive":
-                self.tvf_resize_params[idx]["size"] = (resize_t.size, resize_t.size)
+                self.tvf_resize_params[idx]["size"] = (resize_tfm.size, resize_tfm.size)
             elif self.image_resize_strategy == "letterbox":
                 self.tvf_do_letterbox, self.tvf_letterbox_fill = True, tuple([int(x * 255) for x in self.means[idx]])
             elif self.image_resize_strategy == "resize-crop":
@@ -107,36 +107,35 @@ class PrismaticImageProcessor(ImageProcessorMixin):
             super().__init__(**kwargs)
 
     def apply_transform(self, image: Image.Image) -> torch.Tensor:
+        # return: one list ==> shape of imgs_t: (channel*num_tfms, size, size)
         if self.tvf_do_letterbox:
             image = letterbox_pad_transform(image, self.tvf_letterbox_fill)
 
         # [Contract] Fused Backbones expect "channel-stacked" inputs; we'll unpack on the model side!
-        images_after_t = []
+        images_after_tfm = []
         for idx in range(len(self.input_sizes)):
-            img_idx = TVF.resize(img, **self.tvf_resize_params[idx])
-            img_idx = TVF.center_crop(img, **self.tvf_crop_params[idx])
+            img_idx = TVF.resize(image, **self.tvf_resize_params[idx])
+            img_idx = TVF.center_crop(image, **self.tvf_crop_params[idx])
             img_idx_tensor = TVF.to_tensor(img_idx)
             img_idx_tensor = TVF.normalize(img_idx_tensor, **self.tvf_norm_params[idx])
-            images_after_t.append(img_idx_tensor)
-        
-        ret_images = images_after_t.vstack(images_after_t)
+            images_after_tfm.append(img_idx_tensor)
 
-        return ret_images
+        return torch.vstack(images_after_tfm)
 
     def preprocess(
         self, 
         images: Union[Image.Image, List[Image.Image]],
-        return_tensors: Union[str, TensorType],
+        return_tensors: Union[str, TensorType] = None,
         **_: str,
     ) -> torch.Tensor:
         images = [images] if (not isinstance(images, list)) else images
+        # Stack returned list from `apply_transform` into a batch of all images_t ==> [(channel*num_tfms1, size1, size1), (channel*num_tfms2, size2, size2), ...]
         pixel_values = torch.stack([self.apply_transform(image.convert('RGB')) for image in images])
-
-        return BatchFeature(data={data='pixel_values': pixel_values.float.numpy()}, tensor_type=return_tensors)
+        return BatchFeature(data={'pixel_values': pixel_values.float().numpy()}, tensor_type=return_tensors)
 
     def __call__(
         self, 
-        images: Union[Image.Image, List[Image.Image]]
+        images: Union[Image.Image, List[Image.Image]],
         **kwargs: str,
     ) -> torch.Tensor:
         return preprocess(images, **kwargs)
@@ -149,8 +148,8 @@ class PrismaticProcessor(ProcessorMixin):
 
     def __init__(
         self,
-        image_processor: Optional[ImageProcessingMixin],
-        tokenizer: Optional[AutoTokenizer],
+        image_processor: Optional[ImageProcessingMixin] = None,
+        tokenizer: Optional[AutoTokenizer] = None,
         **kwargs: str,
     ) -> None:
         super.__init__(image_processor, tokenizer)
